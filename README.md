@@ -1,6 +1,6 @@
 # wecom-aibot-python-sdk (Python)
 
-企业微信智能机器人 Python SDK —— 基于 WebSocket 长连接通道，提供消息收发、流式回复、模板卡片、事件回调、文件下载解密等核心能力。
+企业微信智能机器人 Python SDK —— 基于 WebSocket 长连接通道，提供消息收发、流式回复、模板卡片、事件回调、文件下载解密、上传临时素材、回复多媒体消息等核心能力。
 
 > 本项目是 [@wecom/aibot-node-sdk](https://www.npmjs.com/package/@wecom/aibot-node-sdk)（Node.js 版）的 Python 等价实现。
 
@@ -10,13 +10,15 @@
 - 🔐 **自动认证** — 连接建立后自动发送认证帧（bot_id + secret）
 - 💓 **心跳保活** — 自动维护心跳，连续未收到 ack 时自动判定连接异常
 - 🔄 **断线重连** — 指数退避重连策略（1s → 2s → 4s → ... → 30s 上限），支持自定义最大重连次数
-- 📨 **消息分发** — 自动解析消息类型并触发对应事件（text / image / mixed / voice / file）
+- 📨 **消息分发** — 自动解析消息类型并触发对应事件（text / image / mixed / voice / file / video）
 - 🌊 **流式回复** — 内置流式回复方法，支持 Markdown 和图文混排
 - 🃏 **模板卡片** — 支持回复模板卡片消息、流式+卡片组合回复、更新卡片
 - 📤 **主动推送** — 支持向指定会话主动发送 Markdown 或模板卡片消息，无需依赖回调帧
 - 📡 **事件回调** — 支持进入会话、模板卡片按钮点击、用户反馈等事件
 - ⏩ **串行回复队列** — 同一 req_id 的回复消息串行发送，自动等待回执
 - 🔑 **文件下载解密** — 内置 AES-256-CBC 文件解密，每个图片/文件消息自带独立的 aeskey
+- 📎 **上传临时素材** — 支持通过 WebSocket 分片上传图片/文件/语音/视频，返回 media_id（有效期 3 天）
+- 🖼️ **多媒体回复** — 内置 `reply_image()` / `reply_file()` / `reply_voice()` / `reply_video()` 便捷方法
 - 🪵 **可插拔日志** — 支持自定义 Logger，内置带时间戳的 DefaultLogger
 - 🐍 **asyncio 原生** — 基于 Python asyncio 异步架构，支持 async/await
 
@@ -135,6 +137,11 @@ ws_client = WSClient(options: WSClientOptions)
 | `await update_template_card(frame, template_card, userids?)` | 更新模板卡片，需在收到事件 5s 内调用 | `WsFrame` |
 | `await send_message(chatid, body)` | 主动发送消息（支持 Markdown 或模板卡片），无需依赖回调帧 | `WsFrame` |
 | `await download_file(url, aes_key?)` | 下载文件并使用 AES 密钥解密 | `tuple[bytes, str \| None]` |
+| `await upload_media(data, filename, media_type, md5?)` | 分片上传临时素材，返回 media_id（有效期 3 天） | `str` |
+| `await reply_image(frame, media_id)` | 回复图片消息 | `WsFrame` |
+| `await reply_file(frame, media_id)` | 回复文件消息 | `WsFrame` |
+| `await reply_voice(frame, media_id)` | 回复语音消息 | `WsFrame` |
+| `await reply_video(frame, media_id, title?, description?)` | 回复视频消息 | `WsFrame` |
 | `run()` | 便捷启动方法（创建事件循环并连接） | `None` |
 
 #### 属性
@@ -220,6 +227,58 @@ async def on_image(frame):
     print(f'文件名: {filename}, 大小: {len(buffer)} bytes')
 ```
 
+### `upload_media` 详细说明
+
+上传临时素材，采用 WebSocket 分片协议（无需 HTTP），流程：**初始化 → 逐片上传 → 完成合并**，返回 `media_id`。
+
+```python
+from aibot import MediaType
+
+# 上传图片
+with open('photo.jpg', 'rb') as f:
+    media_id = await ws_client.upload_media(f.read(), 'photo.jpg', MediaType.Image)
+
+# 上传文件
+with open('report.pdf', 'rb') as f:
+    media_id = await ws_client.upload_media(f.read(), 'report.pdf', MediaType.File)
+```
+
+**大小限制：**
+
+| 类型 | `MediaType` 值 | 格式 | 大小限制 |
+| --- | --- | --- | --- |
+| 图片 | `MediaType.Image` | png / jpg / jpeg / gif | ≤2MB |
+| 语音 | `MediaType.Voice` | amr | ≤2MB |
+| 视频 | `MediaType.Video` | mp4 | ≤10MB |
+| 文件 | `MediaType.File` | 任意 | ≤20MB |
+
+### `reply_image` / `reply_file` / `reply_voice` / `reply_video` 使用示例
+
+```python
+from aibot import MediaType
+
+@ws_client.on('message.text')
+async def on_text(frame):
+    # 1. 上传素材，获取 media_id
+    with open('photo.jpg', 'rb') as f:
+        media_id = await ws_client.upload_media(f.read(), 'photo.jpg', MediaType.Image)
+
+    # 2. 用 media_id 回复图片
+    await ws_client.reply_image(frame, media_id)
+
+    # 回复文件
+    with open('report.pdf', 'rb') as f:
+        media_id = await ws_client.upload_media(f.read(), 'report.pdf', MediaType.File)
+    await ws_client.reply_file(frame, media_id)
+
+    # 回复视频（支持可选的标题和描述）
+    with open('demo.mp4', 'rb') as f:
+        media_id = await ws_client.upload_media(f.read(), 'demo.mp4', MediaType.Video)
+    await ws_client.reply_video(frame, media_id, title='演示视频', description='这是一段演示')
+```
+
+> **注意**：`upload_media()` 返回的 `media_id` 有效期为 **3 天**，同一 `media_id` 可在有效期内多次用于回复，无需重复上传。
+
 ## ⚙️ 配置选项
 
 `WSClientOptions` 完整配置：
@@ -252,6 +311,7 @@ async def on_image(frame):
 | `message.mixed` | `frame: WsFrame` | 收到图文混排消息 |
 | `message.voice` | `frame: WsFrame` | 收到语音消息 |
 | `message.file` | `frame: WsFrame` | 收到文件消息 |
+| `message.video` | `frame: WsFrame` | 收到视频消息 |
 | `event` | `frame: WsFrame` | 收到事件回调（所有事件类型） |
 | `event.enter_chat` | `frame: WsFrame` | 收到进入会话事件 |
 | `event.template_card_event` | `frame: WsFrame` | 收到模板卡片事件 |
@@ -268,6 +328,16 @@ SDK 支持以下消息类型（`MessageType` 枚举）：
 | `MessageType.Mixed` | `'mixed'` | 图文混排消息 |
 | `MessageType.Voice` | `'voice'` | 语音消息 |
 | `MessageType.File` | `'file'` | 文件消息 |
+| `MessageType.Video` | `'video'` | 视频消息 |
+
+SDK 支持以下临时素材类型（`MediaType` 枚举），用于 `upload_media()`：
+
+| 类型 | 值 | 格式 | 大小限制 |
+| --- | --- | --- | --- |
+| `MediaType.Image` | `'image'` | png / jpg / jpeg / gif | ≤2MB |
+| `MediaType.Voice` | `'voice'` | amr | ≤2MB |
+| `MediaType.Video` | `'video'` | mp4 | ≤10MB |
+| `MediaType.File` | `'file'` | 任意格式 | ≤20MB |
 
 SDK 支持以下事件类型（`EventType` 枚举）：
 

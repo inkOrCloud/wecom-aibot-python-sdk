@@ -67,6 +67,8 @@ class MessageHandler:
             emitter.emit("message.voice", frame)
         elif msgtype == MessageType.File:
             emitter.emit("message.file", frame)
+        elif msgtype == MessageType.Video:
+            emitter.emit("message.video", frame)
         else:
             self._logger.debug(f"Received unhandled message type: {msgtype}")
 

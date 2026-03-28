@@ -6,7 +6,10 @@ WSClient 核心客户端
 """
 
 import asyncio
-from typing import Any, Dict, List, Optional, Tuple
+import base64
+import hashlib
+import math
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pyee.asyncio import AsyncIOEventEmitter
 
@@ -14,7 +17,7 @@ from .api import WeComApiClient
 from .crypto_utils import decrypt_file
 from .logger import DefaultLogger
 from .message_handler import MessageHandler
-from .types import WsCmd, WsFrame, WsFrameHeaders, WSClientOptions
+from .types import MediaType, WsCmd, WsFrame, WsFrameHeaders, WSClientOptions
 from .utils import generate_req_id
 from .ws import WsConnectionManager
 
@@ -331,6 +334,177 @@ class WSClient(AsyncIOEventEmitter):
         except Exception as e:
             self._logger.error(f"File download/decrypt failed: {e}")
             raise
+
+    async def upload_media(
+        self,
+        data: bytes,
+        filename: str,
+        media_type: Union[MediaType, str],
+        md5: Optional[str] = None,
+    ) -> str:
+        """
+        上传临时素材，返回 media_id（有效期 3 天）
+
+        采用分片方式上传（每片 ≤512 KB，Base64 编码），流程：
+          1. aibot_upload_media_init  → upload_id
+          2. aibot_upload_media_chunk × N
+          3. aibot_upload_media_finish → media_id
+
+        文件大小限制：image/voice ≤2MB，video ≤10MB，file ≤20MB
+        上传频率限制：≤30次/分钟，≤1000次/小时
+
+        :param data: 文件原始字节
+        :param filename: 文件名（含扩展名），不超过 256 字节
+        :param media_type: 文件类型，使用 MediaType 枚举或对应字符串
+        :param md5: 可选，文件 MD5（十六进制字符串），服务端将在合并后校验
+        :return: media_id 字符串
+        :raises ValueError: 文件大小超出分片限制
+        :raises RuntimeError: 上传过程中服务端返回错误
+        """
+        # 每片原始字节上限（Base64 编码前）
+        chunk_size = 512 * 1024  # 512 KB
+        total_size = len(data)
+        total_chunks = math.ceil(total_size / chunk_size) if total_size > 0 else 1
+
+        if total_chunks > 100:
+            raise ValueError(
+                f"upload_media: file too large, requires {total_chunks} chunks "
+                f"(max 100). Max sizes: image/voice 2MB, video 10MB, file 20MB."
+            )
+
+        # 如果调用方未传 md5，自动计算
+        file_md5 = md5 or hashlib.md5(data).hexdigest()
+
+        self._logger.info(
+            f"Uploading media: filename={filename}, type={media_type}, "
+            f"size={total_size}B, chunks={total_chunks}"
+        )
+
+        # ── Step 1: 初始化上传 ───────────────────────────────────────────
+        init_req_id = generate_req_id(WsCmd.UPLOAD_MEDIA_INIT)
+        init_body: Dict[str, Any] = {
+            "type": media_type.value if isinstance(media_type, MediaType) else media_type,
+            "filename": filename,
+            "total_size": total_size,
+            "total_chunks": total_chunks,
+            "md5": file_md5,
+        }
+        init_frame = await self._ws_manager.send_reply(
+            init_req_id, init_body, WsCmd.UPLOAD_MEDIA_INIT
+        )
+        upload_id: str = init_frame.get("body", {}).get("upload_id", "")
+        if not upload_id:
+            raise RuntimeError(
+                f"upload_media: init failed, no upload_id in response: {init_frame}"
+            )
+        self._logger.debug(f"upload_media: got upload_id={upload_id}")
+
+        # ── Step 2: 逐片上传 ─────────────────────────────────────────────
+        for i in range(total_chunks):
+            chunk_data = data[i * chunk_size : (i + 1) * chunk_size]
+            chunk_b64 = base64.b64encode(chunk_data).decode("ascii")
+            chunk_req_id = generate_req_id(WsCmd.UPLOAD_MEDIA_CHUNK)
+            chunk_body: Dict[str, Any] = {
+                "upload_id": upload_id,
+                "chunk_index": i,
+                "base64_data": chunk_b64,
+            }
+            await self._ws_manager.send_reply(
+                chunk_req_id, chunk_body, WsCmd.UPLOAD_MEDIA_CHUNK
+            )
+            self._logger.debug(f"upload_media: chunk {i + 1}/{total_chunks} uploaded")
+
+        # ── Step 3: 完成上传 ─────────────────────────────────────────────
+        finish_req_id = generate_req_id(WsCmd.UPLOAD_MEDIA_FINISH)
+        finish_body: Dict[str, Any] = {"upload_id": upload_id}
+        finish_frame = await self._ws_manager.send_reply(
+            finish_req_id, finish_body, WsCmd.UPLOAD_MEDIA_FINISH
+        )
+        media_id: str = finish_frame.get("body", {}).get("media_id", "")
+        if not media_id:
+            raise RuntimeError(
+                f"upload_media: finish failed, no media_id in response: {finish_frame}"
+            )
+
+        self._logger.info(f"upload_media: done, media_id={media_id}")
+        return media_id
+
+    async def reply_image(
+        self,
+        frame: WsFrameHeaders,
+        media_id: str,
+    ) -> WsFrame:
+        """
+        回复图片消息
+
+        :param frame: 收到的原始 WebSocket 帧
+        :param media_id: 图片的 media_id，由 upload_media() 获取
+        :return: 回执帧
+        """
+        return await self.reply(
+            frame,
+            {"msgtype": "image", "image": {"media_id": media_id}},
+        )
+
+    async def reply_file(
+        self,
+        frame: WsFrameHeaders,
+        media_id: str,
+    ) -> WsFrame:
+        """
+        回复文件消息
+
+        :param frame: 收到的原始 WebSocket 帧
+        :param media_id: 文件的 media_id，由 upload_media() 获取
+        :return: 回执帧
+        """
+        return await self.reply(
+            frame,
+            {"msgtype": "file", "file": {"media_id": media_id}},
+        )
+
+    async def reply_voice(
+        self,
+        frame: WsFrameHeaders,
+        media_id: str,
+    ) -> WsFrame:
+        """
+        回复语音消息
+
+        :param frame: 收到的原始 WebSocket 帧
+        :param media_id: 语音的 media_id，由 upload_media() 获取
+        :return: 回执帧
+        """
+        return await self.reply(
+            frame,
+            {"msgtype": "voice", "voice": {"media_id": media_id}},
+        )
+
+    async def reply_video(
+        self,
+        frame: WsFrameHeaders,
+        media_id: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> WsFrame:
+        """
+        回复视频消息
+
+        :param frame: 收到的原始 WebSocket 帧
+        :param media_id: 视频的 media_id，由 upload_media() 获取
+        :param title: 可选，视频标题，不超过 64 字节
+        :param description: 可选，视频描述，不超过 512 字节
+        :return: 回执帧
+        """
+        video: Dict[str, Any] = {"media_id": media_id}
+        if title:
+            video["title"] = title
+        if description:
+            video["description"] = description
+        return await self.reply(
+            frame,
+            {"msgtype": "video", "video": video},
+        )
 
     @property
     def is_connected(self) -> bool:

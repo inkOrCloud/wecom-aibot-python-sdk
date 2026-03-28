@@ -84,6 +84,15 @@ class WsCmd:
     SEND_MSG = "aibot_send_msg"
     """主动发送消息"""
 
+    UPLOAD_MEDIA_INIT = "aibot_upload_media_init"
+    """上传临时素材 - 初始化"""
+
+    UPLOAD_MEDIA_CHUNK = "aibot_upload_media_chunk"
+    """上传临时素材 - 分片上传"""
+
+    UPLOAD_MEDIA_FINISH = "aibot_upload_media_finish"
+    """上传临时素材 - 完成上传"""
+
     # ========== 企业微信 → 开发者 ==========
     CALLBACK = "aibot_msg_callback"
     """消息推送回调"""
@@ -112,6 +121,28 @@ class MessageType(str, Enum):
 
     File = "file"
     """文件消息"""
+
+    Video = "video"
+    """视频消息"""
+
+
+# ========== 临时素材类型枚举 ==========
+
+
+class MediaType(str, Enum):
+    """上传临时素材时指定的文件类型"""
+
+    File = "file"
+    """普通文件，支持任意格式，≤20MB"""
+
+    Image = "image"
+    """图片，支持 png / jpg / jpeg / gif，≤2MB"""
+
+    Voice = "voice"
+    """语音，支持 amr 格式，≤2MB"""
+
+    Video = "video"
+    """视频，支持 mp4 格式，≤10MB"""
 
 
 # ========== 事件类型枚举 (event.ts) ==========

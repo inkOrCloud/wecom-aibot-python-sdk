@@ -15,6 +15,7 @@ from .logger import DefaultLogger
 from .utils import generate_req_id, generate_random_string
 from .types import (
     MessageType,
+    MediaType,
     EventType,
     TemplateCardType,
     WsCmd,
@@ -39,6 +40,7 @@ __all__ = [
     "generate_random_string",
     # 枚举/常量
     "MessageType",
+    "MediaType",
     "EventType",
     "TemplateCardType",
     "WsCmd",
