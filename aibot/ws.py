@@ -314,8 +314,12 @@ class WsConnectionManager:
             if self._ws:
                 try:
                     await self._ws.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    self._logger.warning(
+                        f"Failed to close ws on heartbeat failure: {e}"
+                    )
+            # 触发重连，而非直接 return（修复：心跳超时后永久断线的问题）
+            await self._schedule_reconnect()
             return
 
         self._missed_pong_count += 1
