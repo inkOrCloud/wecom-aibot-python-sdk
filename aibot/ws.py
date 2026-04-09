@@ -309,13 +309,15 @@ class WsConnectionManager:
                 f"No heartbeat ack received for {self._missed_pong_count} consecutive pings, "
                 "connection considered dead"
             )
+            # 在独立任务中触发重连，避免在当前任务被取消后无法执行
+            asyncio.ensure_future(self._schedule_reconnect())
             self._stop_heartbeat()
             # 强制关闭底层连接
             if self._ws:
                 try:
                     await self._ws.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    self._logger.warn(f"Failed to close WebSocket on heartbeat failure: {e}")
             return
 
         self._missed_pong_count += 1
